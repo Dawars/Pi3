@@ -308,13 +308,13 @@ class Pi3X(nn.Module, PyTorchModelHubMixin):
                         p_ray = 0.0
                         rays = torch.zeros((B, N, H, W, 2), device=imgs.device)
                     else:
-                        pix = torch.from_numpy(get_pixel(H, W).T.reshape(H, W, 3)).to(device).float()[None].repeat(B, 1, 1, 1)
+                        pix = torch.from_numpy(get_pixel(H, W).T.reshape(H, W, 3)).float().to(device)[None].repeat(B, 1, 1, 1)
                         rays = torch.einsum('bnij, bhwj -> bnhwi', torch.inverse(intrinsics), pix)[..., :2]
                         # rays = F.normalize(rays, dim=-1).reshape(B, N, H, W, 3)                   # don't normalize, so the pred['xy'] is the same as input rays
 
                 if poses is None:
                     p_pose = 0.0
-                    poses = torch.eye(4, device=device)[None, None].repeat(B, N, 1, 1)
+                    poses = torch.eye(4, dtype=torch.float, device=device)[None, None].repeat(B, N, 1, 1)
                 else:
                     assert rays is not None                     # rays should be along with poses
                     
