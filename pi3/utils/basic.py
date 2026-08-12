@@ -1,6 +1,8 @@
 import os
 import os.path as osp
 import math
+from pathlib import Path
+
 import cv2
 from PIL import Image
 import torch
@@ -19,14 +21,14 @@ def load_images_as_tensor(path="data/truck", interval=1, PIXEL_LIMIT=255000, ver
     if osp.isdir(path):
         if verbose:
             print(f"Loading images from directory: {path}")
-        filenames = sorted([x for x in os.listdir(path) if x.lower().endswith((".png", ".jpg", ".jpeg"))])
+        filenames = sorted([x for x in os.listdir(path) if x.lower().endswith((".png", ".jpg", ".jpeg", ".webp"))])
         for i in range(0, len(filenames), interval):
             img_path = osp.join(path, filenames[i])
             try:
                 sources.append(Image.open(img_path).convert("RGB"))
             except Exception as e:
                 print(f"Could not load image {filenames[i]}: {e}")
-    elif path.lower().endswith(".mp4"):
+    elif Path(path).suffix in [".mkv", ".mp4"]:
         if verbose:
             print(f"Loading frames from video: {path}")
         cap = cv2.VideoCapture(path)
@@ -117,14 +119,14 @@ def load_multimodal_data(path="data/truck", conditions=None, interval=1, PIXEL_L
     if osp.isdir(path):
         if verbose:
             print(f"Loading images from directory: {path}")
-        filenames = sorted([x for x in os.listdir(path) if x.lower().endswith((".png", ".jpg", ".jpeg"))])
+        filenames = sorted([x for x in os.listdir(path) if x.lower().endswith((".png", ".jpg", ".jpeg", ".webp"))])
         for i in range(0, len(filenames), interval):
             img_path = osp.join(path, filenames[i])
             try:
                 sources.append(Image.open(img_path).convert("RGB"))
             except Exception as e:
                 print(f"Could not load image {filenames[i]}: {e}")
-    elif path.lower().endswith(".mp4"):
+    elif Path(path).suffix in [".mkv", ".mp4"]:
         if verbose:
             print(f"Loading frames from video: {path}")
         cap = cv2.VideoCapture(path)
