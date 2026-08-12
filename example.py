@@ -48,8 +48,8 @@ if __name__ == '__main__':
             weight = load_file(args.ckpt)
         else:
             weight = torch.load(args.ckpt, map_location=device, weights_only=False)
-        
-        model.load_state_dict(weight)
+        weight_ = {k.replace("model.", ""): v for k, v in weight.items()}
+        model.load_state_dict(weight["model"])  # , strict=False)  # --ckpt ckpts/pi3-FT_weight.pt
     else:
         model = Pi3.from_pretrained("yyfz233/Pi3").to(device).eval()
         # or download checkpoints from `https://huggingface.co/yyfz233/Pi3/resolve/main/model.safetensors`, and `--ckpt ckpts/model.safetensors`
