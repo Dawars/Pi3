@@ -119,9 +119,9 @@ def load_multimodal_data(path="data/truck", conditions=None, interval=1, PIXEL_L
     if osp.isdir(path):
         if verbose:
             print(f"Loading images from directory: {path}")
-        filenames = sorted([x for x in os.listdir(path) if x.lower().endswith((".png", ".jpg", ".jpeg", ".webp"))])
+        filenames = sorted([x for x in Path(path).glob("**/*") if x.suffix.lower() in [".png", ".jpg", ".jpeg", ".webp"]])
         for i in range(0, len(filenames), interval):
-            img_path = osp.join(path, filenames[i])
+            img_path = filenames[i]
             try:
                 sources.append(Image.open(img_path).convert("RGB"))
             except Exception as e:
