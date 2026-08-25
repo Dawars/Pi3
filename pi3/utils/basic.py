@@ -145,15 +145,21 @@ def load_multimodal_data_thumbnails(image_dir: Path, colmap_path: Path,
     # --- 2. Compute thumbnail scale factor based on first image ---
     first_img = sources[0]
     W_orig, H_orig = first_img.size
-    scale = math.sqrt(PIXEL_LIMIT / (W_orig * H_orig)) if W_orig * H_orig > 0 else 1
-    W_target, H_target = W_orig * scale, H_orig * scale
-    k, m = round(W_target / 14), round(H_target / 14)
-    while (k * 14) * (m * 14) > PIXEL_LIMIT:
-        if k / m > W_target / H_target:
-            k -= 1
-        else:
-            m -= 1
-    TARGET_W, TARGET_H = max(1, k) * 14, max(1, m) * 14
+
+    # Thumbnail scales to fit within TARGET_SIZE while preserving aspect ratio
+    scale_w = TARGET_SIZE / W_orig
+    scale_h = TARGET_SIZE / H_orig
+    scale = min(scale_w, scale_h)  # Choose smaller scale to fit within square
+
+    W_new = int(W_orig * scale)
+    H_new = int(H_orig * scale)
+
+    # Padding amounts (centered)
+    pad_left = (TARGET_SIZE - W_new) // 2
+    pad_right = TARGET_SIZE - W_new - pad_left
+    pad_top = (TARGET_SIZE - H_new) // 2
+    pad_bottom = TARGET_SIZE - H_new - pad_top
+
     if verbose:
         print(f"Original size: {W_orig}×{H_orig}")
         print(f"Scaled to: {W_new}×{H_new} (scale={scale:.4f})")
