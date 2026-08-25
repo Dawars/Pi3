@@ -4,16 +4,29 @@ import math
 from pathlib import Path
 
 import cv2
+import pycolmap
 from PIL import Image
 import torch
 from torchvision import transforms
 from plyfile import PlyData, PlyElement
 import numpy as np
 
-def load_images_as_tensor(path="data/truck", interval=1, PIXEL_LIMIT=255000, verbose=True):
+import math
+import os
+import os.path as osp
+from pathlib import Path
+import cv2
+from PIL import Image
+import torch
+from torchvision import transforms
+
+
+def load_images_as_tensor(path="data/truck", interval=1, target_size=518, verbose=True):
     """
-    Loads images from a directory or video, resizes them to a uniform size,
-    then converts and stacks them into a single [N, 3, H, W] PyTorch tensor.
+    Loads images from a directory or video, resizes each to fit within
+    target_size x target_size (preserving aspect ratio), pads with white
+    borders to a uniform target_size x target_size, and stacks into a
+    [N, 3, H, W] PyTorch tensor.
     """
     sources = []
 
@@ -54,8 +67,82 @@ def load_images_as_tensor(path="data/truck", interval=1, PIXEL_LIMIT=255000, ver
     if verbose:
         print(f"Found {len(sources)} images/frames. Processing...")
 
-    # --- 2. Determine a uniform target size for all images based on the first image ---
-    # This is necessary to ensure all tensors have the same dimensions for stacking.
+    # --- 2. Resize each image to fit within target_size, then pad with white to target_size x target_size ---
+    tensor_list = []
+    to_tensor_transform = transforms.ToTensor()
+
+    for img_pil in sources:
+        try:
+            W_orig, H_orig = img_pil.size
+            scale = target_size / max(W_orig, H_orig)
+            W_new, H_new = round(W_orig * scale), round(H_orig * scale)
+            resized_img = img_pil.resize((W_new, H_new), Image.Resampling.LANCZOS)
+
+            # pad with white borders to target_size x target_size, centering the image
+            padded_img = Image.new("RGB", (target_size, target_size), (255, 255, 255))
+            paste_x = (target_size - W_new) // 2
+            paste_y = (target_size - H_new) // 2
+            padded_img.paste(resized_img, (paste_x, paste_y))
+
+            img_tensor = to_tensor_transform(padded_img)
+            tensor_list.append(img_tensor)
+        except Exception as e:
+            print(f"Error processing an image: {e}")
+
+    if not tensor_list:
+        print("No images were successfully processed.")
+        return torch.empty(0)
+
+    # --- 3. Stack the list of tensors into a single [N, C, H, W] batch tensor ---
+    return torch.stack(tensor_list, dim=0)
+
+
+def load_multimodal_data_thumbnails(image_dir: Path, colmap_path: Path,
+                                    conditions=True, interval=1,
+                                    TARGET_SIZE=518, verbose=True,
+                                    device='cpu'):
+    """
+    Load images with thumbnail + padding to square resolution (like "In the Wild" paper).
+
+    Preserves aspect ratio by:
+    1. Scaling image to fit within TARGET_SIZE×TARGET_SIZE while maintaining aspect ratio
+    2. Padding with white borders to reach exact TARGET_SIZE×TARGET_SIZE
+
+    Adjusts intrinsics:
+    - fx, fy scale by the same factor as the image
+    - cx, cy shift by the padding offsets
+
+    Returns:
+        dict: {
+            'images': (N, 3, H, W),  # All (N, 3, 518, 518)
+            'poses': (N, 4, 4) or None,
+            'intrinsics': (N, 3, 3) or None
+        }
+    """
+    sources = []
+    recon = pycolmap.Reconstruction(colmap_path)
+
+    # --- 1. Load images from COLMAP reconstruction ---
+    print(f"Loading images from directory: {image_dir}")
+    images = [img for img in recon.images.values() if img.has_pose]
+    filenames = sorted([img.name for img in images])
+    N_total = len(filenames)
+
+    for i in range(0, len(filenames), interval):
+        img_path = image_dir / filenames[i]
+        try:
+            sources.append(Image.open(img_path).convert("RGB"))
+        except Exception as e:
+            print(f"Could not load image {filenames[i]}: {e}")
+
+    if not sources:
+        print("No images found or loaded.")
+        return {'images': torch.empty(0)}
+
+    if verbose:
+        print(f"Found {len(sources)} images. Processing...")
+
+    # --- 2. Compute thumbnail scale factor based on first image ---
     first_img = sources[0]
     W_orig, H_orig = first_img.size
     scale = math.sqrt(PIXEL_LIMIT / (W_orig * H_orig)) if W_orig * H_orig > 0 else 1
@@ -68,30 +155,206 @@ def load_images_as_tensor(path="data/truck", interval=1, PIXEL_LIMIT=255000, ver
             m -= 1
     TARGET_W, TARGET_H = max(1, k) * 14, max(1, m) * 14
     if verbose:
-        print(f"All images will be resized to a uniform size: ({TARGET_W}, {TARGET_H})")
+        print(f"Original size: {W_orig}×{H_orig}")
+        print(f"Scaled to: {W_new}×{H_new} (scale={scale:.4f})")
+        print(f"Padded to: {TARGET_SIZE}×{TARGET_SIZE} (padding: left={pad_left}, top={pad_top})")
 
-    # --- 3. Resize images and convert them to tensors in the [0, 1] range ---
+    # --- 3. Process all images ---
     tensor_list = []
-    # Define a transform to convert a PIL Image to a CxHxW tensor and normalize to [0,1]
-    to_tensor_transform = transforms.ToTensor()
+    to_tensor = transforms.ToTensor()  # Converts to [0, 1] float tensor
+    white_padding = (255, 255, 255)  # White borders
 
     for img_pil in sources:
         try:
-            # Resize to the uniform target size
-            resized_img = img_pil.resize((TARGET_W, TARGET_H), Image.Resampling.LANCZOS)
+            # Step 3a: Resize with thumbnail (preserves aspect ratio)
+            resized = img_pil.resize((W_new, H_new), Image.Resampling.LANCZOS)
+
+            # Step 3b: Pad to square with white borders
+            padded = Image.new("RGB", (TARGET_SIZE, TARGET_SIZE), white_padding)
+            padded.paste(resized, (pad_left, pad_top))
+
             # Convert to tensor
-            img_tensor = to_tensor_transform(resized_img)
+            img_tensor = to_tensor(padded)  # [3, TARGET_SIZE, TARGET_SIZE]
             tensor_list.append(img_tensor)
+
         except Exception as e:
             print(f"Error processing an image: {e}")
 
     if not tensor_list:
         print("No images were successfully processed.")
-        return torch.empty(0)
+        return {'images': torch.empty(0)}
 
-    # --- 4. Stack the list of tensors into a single [N, C, H, W] batch tensor ---
-    return torch.stack(tensor_list, dim=0)
+    # Stack to batch tensor
+    images_tensor = torch.stack(tensor_list, dim=0)  # (N, 3, H, W)
+    N_out = images_tensor.shape[0]
 
+    # =========================================================================
+    # Process Conditions (Poses & Intrinsics only - no depths)
+    # =========================================================================
+
+    out_poses = None
+    out_intrinsics = None
+
+    if conditions:
+        # Prepare raw arrays
+        raw_intrinsics = np.zeros((N_total, 3, 3), dtype=np.float32)
+        raw_poses = np.zeros((N_total, 4, 4), dtype=np.float32)
+
+        image: pycolmap.Image
+        for i, image in enumerate(images):
+            # Intrinsics from COLMAP (pixel coordinates at original image size)
+            raw_intrinsics[i] = image.camera.calibration_matrix()
+
+            # Camera-to-world pose (COLMAP stores world-to-camera, we invert)
+            raw_poses[i] = np.eye(4)
+            raw_poses[i][:3] = image.cam_from_world().inverse().matrix()
+
+        # Apply interval and trim to actual number of loaded images
+        sliced_poses = raw_poses[::interval][:N_out]
+        out_poses = torch.from_numpy(sliced_poses).float()[None].to(device)  # (1, N, 4, 4)
+
+        # Process intrinsics with thumbnail scaling + padding offset
+        sliced_Ks = raw_intrinsics[::interval][:N_out].copy()
+
+        # Step 1: Scale focal length and principal point by thumbnail scale
+        sliced_Ks[:, 0, 0] *= scale  # fx
+        sliced_Ks[:, 1, 1] *= scale  # fy
+        sliced_Ks[:, 0, 2] *= scale  # cx
+        sliced_Ks[:, 1, 2] *= scale  # cy
+
+        # Step 2: Add padding offset (cx, cy shift by padding amount)
+        sliced_Ks[:, 0, 2] += pad_left  # cx shifts right by pad_left
+        sliced_Ks[:, 1, 2] += pad_top  # cy shifts down by pad_top
+
+        out_intrinsics = torch.from_numpy(sliced_Ks).float()[None].to(device)  # (1, N, 3, 3)
+
+    return images_tensor[None].to(device), {
+        'poses': out_poses,  # (1, N, 4, 4)
+        'depths': None,  # Not used
+        'intrinsics': out_intrinsics  # (1, N, 3, 3)
+    }
+def load_multimodal_data_colmap(image_dir: Path, colmap_path: Path, conditions=False, interval=1, target_size=518, verbose=True,
+                         device='cpu'):
+    """
+    Loads images, resizes each to fit within target_size x target_size (preserving
+    aspect ratio), pads with white borders to target_size x target_size, and aligns
+    optional conditions (poses, depths, intrinsics).
+
+    Args:
+
+    Returns:
+        dict: {
+            'images': (N, 3, H, W),
+            'poses': (N, 4, 4) or None,
+            # 'depths': (N, H, W) or None,
+            'intrinsics': (N, 3, 3) or None
+        }
+    """
+    sources = []
+    recon = pycolmap.Reconstruction(colmap_path)
+    # --- 1. Load image paths or video frames ---
+    print(f"Loading images from directory: {image_dir}")
+    # Keep the COLMAP record together with its image throughout loading.  The
+    # iteration order of recon.images is not filename order, so sorting only
+    # filenames would silently pair images with another view's camera data.
+    image_records = sorted(
+        (image for image in recon.images.values() if image.has_pose),
+        key=lambda image: image.name,
+    )
+    for image in image_records[::interval]:
+        img_path = image_dir / image.name
+        try:
+            sources.append((image, Image.open(img_path).convert("RGB")))
+        except Exception as e:
+            print(f"Could not load image {image.name}: {e}")
+
+    if not sources:
+        print("No images found or loaded.")
+        return {'images': torch.empty(0)}
+
+    if verbose:
+        print(f"Found {len(sources)} images/frames. Processing...")
+        print(f"All images will be resized (aspect-preserved) and padded to: ({target_size}, {target_size})")
+
+    # --- 2. Resize each image to fit target_size, pad with white to target_size x target_size ---
+    tensor_list = []
+    to_tensor_transform = transforms.ToTensor()
+    # per-image scale/offset, needed later to rescale intrinsics correctly
+    scales = []       # scale factor applied to each original image
+    offsets = []       # (paste_x, paste_y) padding offset for each image
+
+    processed_records = []
+    for image, img_pil in sources:
+        try:
+            W_orig, H_orig = img_pil.size
+            scale = target_size / max(W_orig, H_orig)
+            W_new, H_new = round(W_orig * scale), round(H_orig * scale)
+            resized_img = img_pil.resize((W_new, H_new), Image.Resampling.LANCZOS)
+
+            padded_img = Image.new("RGB", (target_size, target_size), (255, 255, 255))
+            paste_x = (target_size - W_new) // 2
+            paste_y = (target_size - H_new) // 2
+            padded_img.paste(resized_img, (paste_x, paste_y))
+
+            img_tensor = to_tensor_transform(padded_img)
+            tensor_list.append(img_tensor)
+            scales.append(scale)
+            offsets.append((paste_x, paste_y))
+            processed_records.append(image)
+        except Exception as e:
+            print(f"Error processing an image: {e}")
+
+    if not tensor_list:
+        print("No images were successfully processed.")
+        return {'images': torch.empty(0)}
+
+    # --- 3. Stack the list of tensors into a single [N, C, H, W] batch tensor ---
+    images_tensor = torch.stack(tensor_list, dim=0)
+    N_out = images_tensor.shape[0]  # The actual number of successfully processed frames
+
+    # =========================================================================
+    # Process Conditions (Poses, Depths, Intrinsics)
+    # =========================================================================
+
+    out_poses = None
+    out_depths = None
+    out_intrinsics = None
+
+    if conditions:
+        raw_intrinsics = np.zeros((N_out, 3, 3), dtype=np.float32)
+        raw_poses = np.zeros((N_out, 4, 4), dtype=np.float32)
+        image: pycolmap.Image
+        for i, image in enumerate(processed_records):
+            # Intrinsics
+            raw_intrinsics[i] = image.camera.calibration_matrix()
+
+            # Pose (camera-to-world)
+            raw_poses[i] = np.eye(4)
+            raw_poses[i][:3] = image.cam_from_world().inverse().matrix()
+
+        out_poses = torch.from_numpy(raw_poses).float()[None].to(device)  # (1, N, 4, 4)
+
+        # Copy to avoid modifying the unscaled calibration matrices.
+        sliced_Ks = raw_intrinsics.copy()
+
+        # Rescale (fx, fy, cx, cy) per-image, accounting for aspect-preserving
+        # resize (single scale, since we resize by max-side) and padding offset.
+        # K = [[fx, 0, cx], [0, fy, cy], [0, 0, 1]]
+        for i in range(N_out):
+            scale = scales[i]
+            paste_x, paste_y = offsets[i]
+            sliced_Ks[i, 0, 0] *= scale               # fx
+            sliced_Ks[i, 1, 1] *= scale               # fy
+            sliced_Ks[i, 0, 2] = sliced_Ks[i, 0, 2] * scale + paste_x  # cx
+            sliced_Ks[i, 1, 2] = sliced_Ks[i, 1, 2] * scale + paste_y  # cy
+
+        out_intrinsics = torch.from_numpy(sliced_Ks).float()[None].to(device)  # (N, 3, 3)
+
+    return images_tensor[None].to(device), {
+        'poses': out_poses,  # (N, 4, 4)
+        'depths': out_depths,  # (N, H, W)
+        'intrinsics': out_intrinsics  # (N, 3, 3)
+    }
 
 def load_multimodal_data(path="data/truck", conditions=None, interval=1, PIXEL_LIMIT=255000, verbose=True, device='cpu'):
     """
@@ -391,3 +654,68 @@ def write_ply(
     vertex_element = PlyElement.describe(elements, "vertex")
     ply_data = PlyData([vertex_element])
     ply_data.write(path)
+
+
+def write_masked_ply_stream(
+    points: torch.Tensor,
+    colors: torch.Tensor,
+    mask: torch.Tensor,
+    path: str | Path,
+    chunk_size: int = 262_144,
+) -> None:
+    """Write a masked point cloud without materializing it on the CPU.
+
+    ``points`` has shape ``(N, H, W, 3)``, ``colors`` has shape
+    ``(N, 3, H, W)``, and ``mask`` has shape ``(N, H, W)``.  Only the
+    selected points in one chunk are copied from the active device at a time.
+    This is important on MPS, where a whole-tensor ``.cpu()`` copy can consume
+    additional unified memory rather than releasing device memory.
+    """
+    if points.ndim != 4 or points.shape[-1] != 3:
+        raise ValueError("points must have shape (N, H, W, 3)")
+    if colors.ndim != 4 or colors.shape[1] != 3:
+        raise ValueError("colors must have shape (N, 3, H, W)")
+    if mask.shape != points.shape[:-1] or colors.shape[0] != points.shape[0]:
+        raise ValueError("points, colors, and mask must describe the same views")
+
+    point_count = int(mask.sum().item())
+    vertex_dtype = np.dtype([
+        ("x", "<f4"), ("y", "<f4"), ("z", "<f4"),
+        ("red", "u1"), ("green", "u1"), ("blue", "u1"),
+    ])
+    header = (
+        "ply\n"
+        "format binary_little_endian 1.0\n"
+        f"element vertex {point_count}\n"
+        "property float x\n"
+        "property float y\n"
+        "property float z\n"
+        "property uchar red\n"
+        "property uchar green\n"
+        "property uchar blue\n"
+        "end_header\n"
+    ).encode("ascii")
+
+    with open(path, "wb") as ply_file:
+        ply_file.write(header)
+        for view_idx in range(points.shape[0]):
+            points_view = points[view_idx].reshape(-1, 3)
+            colors_view = colors[view_idx].permute(1, 2, 0).reshape(-1, 3)
+            mask_view = mask[view_idx].reshape(-1)
+
+            for start in range(0, mask_view.numel(), chunk_size):
+                end = min(start + chunk_size, mask_view.numel())
+                selected = mask_view[start:end]
+                if not bool(selected.any().item()):
+                    continue
+
+                # Boolean indexing and the CPU transfer are both bounded by
+                # chunk_size; do not create points[mask] or colors[mask].
+                xyz = points_view[start:end][selected].detach().to("cpu", torch.float32).numpy()
+                rgb = colors_view[start:end][selected].detach().to("cpu", torch.float32).numpy()
+
+                vertices = np.empty(xyz.shape[0], dtype=vertex_dtype)
+                vertices["x"], vertices["y"], vertices["z"] = xyz.T
+                rgb = np.clip(rgb * 255.0, 0, 255).astype(np.uint8)
+                vertices["red"], vertices["green"], vertices["blue"] = rgb.T
+                ply_file.write(vertices.tobytes())
